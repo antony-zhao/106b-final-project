@@ -3,17 +3,17 @@ import torch
 
 class ReplayBuffer:
     # simple replay buffer for atari testing, probably need to modify for the robot and/or we modify the observations somehow
-    def __init__(self, observation_shape, num_actions, obs_type=np.float32, batch_size=64, capacity=1_000_000, device='cuda'):
+    def __init__(self, observation_shape, action_dim, obs_type=np.float32, batch_size=64, capacity=1_000_000, device='cuda'):
         self.idx = 0
         self.capacity = capacity
         self.batch_size = batch_size
         self.full = False
         self.device = device
         self.observations = np.empty((capacity, *observation_shape), dtype=obs_type)
-        self.actions = np.empty((capacity, num_actions))
-        self.rewards = np.empty((capacity, 1))
+        self.actions = np.empty((capacity, *action_dim), dtype=np.float32)
+        self.rewards = np.empty((capacity,), dtype=np.float32)
         self.next_observations = np.empty((capacity, *observation_shape), dtype=obs_type)
-        self.dones = np.empty((capacity, 1), dtype=np.bool)
+        self.dones = np.empty((capacity,), dtype=np.bool)
         
     def add_sample(self, obs, action, reward, next_obs, done):
         self.observations[self.idx] = obs
@@ -29,7 +29,7 @@ class ReplayBuffer:
     def add_batch(self, obs_batch, action_batch, reward_batch, next_obs_batch, done_batch):
         batch_size = obs_batch.shape[0]
         i0 = self.idx
-        i1 = self.idx = batch_size
+        i1 = self.idx + batch_size
         self.observations[i0:i1] = obs_batch
         self.actions[i0:i1] = action_batch
         self.rewards[i0:i1] = reward_batch
@@ -45,8 +45,8 @@ class ReplayBuffer:
         indices = np.random.randint(max_idx, size=self.batch_size)
         
         obs = torch.tensor(self.observations[indices]).to(self.device).float()
-        action = torch.tensor(self.actions[indices]).to(self.device)
-        reward = torch.tensor(self.rewards[indices]).to(self.device)
+        action = torch.tensor(self.actions[indices]).to(self.device).float()
+        reward = torch.tensor(self.rewards[indices]).to(self.device).float()
         next_obs = torch.tensor(self.next_observations[indices]).to(self.device).float()
         done = torch.tensor(self.dones[indices]).to(self.device).float()
         
