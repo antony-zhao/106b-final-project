@@ -30,15 +30,28 @@ class ReplayBuffer:
         batch_size = obs_batch.shape[0]
         i0 = self.idx
         i1 = self.idx + batch_size
-        self.observations[i0:i1] = obs_batch
-        self.actions[i0:i1] = action_batch
-        self.rewards[i0:i1] = reward_batch
-        self.next_observations[i0:i1] = next_obs_batch
-        self.dones[i0:i1] = done_batch
-        self.idx += batch_size
-        if self.idx >= self.capacity:
+        if i1 <= self.capacity:
+            self.observations[i0:i1] = obs_batch
+            self.actions[i0:i1] = action_batch
+            self.rewards[i0:i1] = reward_batch
+            self.next_observations[i0:i1] = next_obs_batch
+            self.dones[i0:i1] = done_batch
+        else:
+            overflow = i1 - self.capacity
+            first_part = batch_size - overflow
+            self.observations[i0:self.capacity] = obs_batch[:first_part]
+            self.actions[i0:self.capacity] = action_batch[:first_part]
+            self.rewards[i0:self.capacity] = reward_batch[:first_part]
+            self.next_observations[i0:self.capacity] = next_obs_batch[:first_part]
+            self.dones[i0:self.capacity] = done_batch[:first_part]
+            self.observations[0:overflow] = obs_batch[first_part:]
+            self.actions[0:overflow] = action_batch[first_part:]
+            self.rewards[0:overflow] = reward_batch[first_part:]
+            self.next_observations[0:overflow] = next_obs_batch[first_part:]
+            self.dones[0:overflow] = done_batch[first_part:]
+        self.idx = (self.idx + batch_size) % self.capacity
+        if not self.full and self.idx < i0:
             self.full = True
-            self.idx %= self.capacity
     
     def sample(self):
         max_idx = self.capacity if self.full else self.idx
