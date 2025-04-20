@@ -54,10 +54,10 @@ class ResBlock(nn.Module):
 
 class AtariConv(nn.Module):
     # assumes the 84x84 grayscale and 4 frame stack
-    def __init__(self, act=nn.SELU, flatten_out=False):
+    def __init__(self, act=nn.SELU, flatten_out=False, input_channels=4):
         super(AtariConv, self).__init__()
         self.convs = nn.Sequential(
-            ResBlock(in_channels=4, out_channels=32, kernel_size=7, stride=3), # (4, 84, 84) -> (32, 28, 28)
+            ResBlock(in_channels=input_channels, out_channels=32, kernel_size=7, stride=3), # (4, 84, 84) -> (32, 28, 28)
             act(),
             ResBlock(in_channels=32, out_channels=64, kernel_size=5, stride=2), # (32, 28, 28) -> (64, 14, 14)
             act(),
@@ -65,11 +65,11 @@ class AtariConv(nn.Module):
             act(),
             ResBlock(in_channels=128, out_channels=256, kernel_size=3, stride=2) # (128, 7, 7) -> (256, 4, 4) or 4096
         )
-        self.output_dim = self.compute_output_dim()
+        self.output_dim = self.compute_output_dim(input_channels)
         self.flatten_out = flatten_out
     
-    def compute_output_dim(self):
-        x = torch.zeros(1, 4, 84, 84)
+    def compute_output_dim(self, input_channels):
+        x = torch.zeros(1, input_channels, 84, 84)
         x = self.convs(x)
         return x.view(-1).shape[0]
         

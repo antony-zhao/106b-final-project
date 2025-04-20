@@ -1,7 +1,7 @@
 from stable_baselines3.common.env_util import make_atari_env, make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize, VecTransposeImage, VecFrameStack
 from stable_baselines3.common.base_class import BaseAlgorithm
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CallbackList
 from stable_baselines3 import PPO, SAC
 import torch
 from torch import optim
@@ -11,6 +11,7 @@ import gymnasium as gym
 import ale_py
 from icm import ICM, ForwardModel, InverseModel, AtariConv
 from rnd import RND, AtariFeatureModel, RunningMeanStd
+import imageio
 
 gym.register_envs(ale_py)
 
@@ -59,12 +60,14 @@ class ICMCallback(BaseCallback):
 
 class RNDCallback(BaseCallback):
     # Based on https://github.com/RLE-Foundation/RLeXplore/blob/main/2%20rlexplore_with_sb3.ipynb, but with our own icm code
-    def __init__(self, rnd, opt, verbose=0):
+    def __init__(self, rnd, opt, eval_env, verbose=0):
         super(RNDCallback, self).__init__(verbose)
         self.rnd = rnd
         self.opt = opt
         self.buffer = None
         self.rms = RunningMeanStd()
+        self.eval_env = eval_env
+        self.i = 0
 
     def init_callback(self, model: BaseAlgorithm) -> None:
         super().init_callback(model)
@@ -82,6 +85,17 @@ class RNDCallback(BaseCallback):
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
+        if (self.i % 10) == 0:
+            obs = self.eval_env.reset()
+            frames = []
+            done = False
+            while not done:
+                action, _states = self.model.predict(obs)
+                obs, rewards, done, info = self.eval_env.step(action)
+                frames.append(self.eval_env.render())
+            
+            imageio.mimwrite(f'gifs/{args.env}_{self.i}.gif', frames)
+        self.i += 1
         # add the intrinsic rewards to the buffer (?)
         intrinsic_rewards = intrinsic_rewards.reshape(self.buffer.rewards.shape)
         # self.buffer.rewards += intrinsic_rewards
@@ -98,6 +112,7 @@ class RNDCallback(BaseCallback):
         next_obs = self.locals["new_obs"].reshape(-1, 4, 84, 84)
         self.rms.update(next_obs)
         next_obs = (next_obs - self.rms.mean) / (np.sqrt(self.rms.var) + 1e-8)
+        next_obs = np.clip(next_obs, -5, 5)
         next_obs = torch.as_tensor(next_obs).float()
         intrinsic_rewards, _ = self.rnd.compute_intrinsic(next_obs)        
         self.locals["rewards"] += intrinsic_rewards
@@ -110,22 +125,22 @@ def main(args):
     device = ('cuda' if torch.cuda.is_available() else 'cpu')
     env = make_atari_env(f'ALE/{args.env}-v5', args.num_envs, args.seed)
     env = VecTransposeImage(VecFrameStack(env, 4))
-     
-    # feature_model = AtariConv(flatten_out=True)
-    # feature_dim = feature_model.output_dim
-    # action_dim = env.action_space.n
-    # inverse_model = InverseModel(feature_dim, action_dim)
-    # forward_model = ForwardModel(feature_dim, action_dim)
-    # opt = optim.Adam(list(feature_model.parameters()) + list(inverse_model.parameters()) + list(forward_model.parameters()), lr=args.lr)
-    # icm = icm(feature_model, forward_model, inverse_model, is_discrete=True)
+    eval_env = make_atari_env(f'ALE/{args.env}-v5', 1, args.seed)
+    eval_env = VecTransposeImage(VecFrameStack(eval_env, 4))
+
     feature_model = AtariFeatureModel()
     target_model = AtariFeatureModel()
     opt = optim.Adam(feature_model.parameters(), lr=args.lr)
     rnd = RND(feature_model, target_model)
     
-    model = PPO('CnnPolicy', env, verbose=1, device=device, n_steps=256, tensorboard_log=f'logs/{args.env}')
-    # model.learn(total_timesteps=args.timesteps, callback=ICMCallback(icm, opt))
-    model.learn(total_timesteps=args.timesteps * args.num_envs, callback=RNDCallback(rnd, opt))
+    eval_callback = EvalCallback(eval_env, 
+                             log_path=f"logs/{args.env}", eval_freq=500,
+                             deterministic=False, render=True)
+    
+    model = PPO('CnnPolicy', env, verbose=1, device=device, n_steps=128, 
+                tensorboard_log=f'logs/{args.env}', ent_coef=1e-3)
+    model.learn(total_timesteps=args.timesteps * args.num_envs, callback=CallbackList([RNDCallback(rnd, opt, eval_env), eval_callback]))
+    model.save(f'{env}_ppo')
     
     
 if __name__ == '__main__':
@@ -141,10 +156,10 @@ if __name__ == '__main__':
     parser.add_argument('--tau', type=float, default=1e-3)
     parser.add_argument('--minibatch_size', type=int, default=256)
     parser.add_argument('--replay_capacity', type=int, default=1_000_000)
-    parser.add_argument('--num_envs', type=int, default=24)
+    parser.add_argument('--num_envs', type=int, default=128)
     parser.add_argument('--update_every', type=int, default=1)
     parser.add_argument('--train_after', type=int, default=10_000)
-    parser.add_argument('--timesteps', type=int, default=1_000_000)
+    parser.add_argument('--timesteps', type=int, default=2_000_000)
     parser.add_argument('--log_every', type=int, default=128)
     parser.add_argument('--num_epochs', type=int, default=1)
     parser.add_argument('--init_steps', type=int, default=50)
