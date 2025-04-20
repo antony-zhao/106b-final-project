@@ -2,7 +2,7 @@ from torch import nn
 import torch
 
 class MLP(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim=256, num_hiddens=2, act=nn.SELU, hidden_dims=None):
+    def __init__(self, input_dim, output_dim, hidden_dim=256, num_hiddens=2, act=nn.SiLU, hidden_dims=None):
         super(MLP, self).__init__()
         if hidden_dims is not None:
             assert len(hidden_dims) + 1 == num_hiddens
@@ -33,7 +33,7 @@ class MLP(nn.Module):
         return logits
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, act=nn.SELU):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, act=nn.SiLU):
         super(ResBlock, self).__init__()
         padding = int((kernel_size - 1) // 2)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
@@ -54,7 +54,7 @@ class ResBlock(nn.Module):
 
 class AtariConv(nn.Module):
     # assumes the 84x84 grayscale and 4 frame stack
-    def __init__(self, act=nn.SELU, flatten_out=False, input_channels=4):
+    def __init__(self, act=nn.SiLU, flatten_out=False, input_channels=4):
         super(AtariConv, self).__init__()
         self.convs = nn.Sequential(
             ResBlock(in_channels=input_channels, out_channels=32, kernel_size=7, stride=3), # (4, 84, 84) -> (32, 28, 28)

@@ -139,14 +139,14 @@ def main(args):
     
     model = PPO('CnnPolicy', env, verbose=1, device=device, n_steps=128, 
                 tensorboard_log=f'logs/{args.env}', ent_coef=1e-3)
-    model.learn(total_timesteps=args.timesteps * args.num_envs, callback=CallbackList([RNDCallback(rnd, opt, eval_env), eval_callback]))
+    model.learn(total_timesteps=args.timesteps * args.num_envs, callback=eval_callback)
     model.save(f'{env}_ppo')
     
     
 if __name__ == '__main__':
     from argparse import ArgumentParser
     parser = ArgumentParser()
-    parser.add_argument('--env', type=str, default='MontezumaRevenge') #MontezumaRevenge
+    parser.add_argument('--env', type=str, default='Breakout') #MontezumaRevenge
     parser.add_argument('--discount', type=float, default=0.99)
     parser.add_argument('--alpha', type=float, default=0.4)
     parser.add_argument('--critic_coef', type=float, default=1)

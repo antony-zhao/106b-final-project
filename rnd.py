@@ -71,7 +71,7 @@ class RunningMeanStd(object):
         self.count = new_count
 
 class AtariRNDValueNetwork(nn.Module):
-    def __init__(self, act=nn.SELU):
+    def __init__(self, act=nn.SiLU):
         super(AtariRNDValueNetwork, self).__init__()
         self.conv = AtariConv()
         self.mlp = MLP(self.conv.output_dim, 256)
@@ -94,7 +94,7 @@ def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_re
     val_loss = F.mse_loss(reg_ret, values.squeeze(1)) + F.mse_loss(rnd_ret, rnd_values.squeeze(1))
     
     action_dist = ppo_network.policy_network.policy_dist(obs)
-    action_log_prob = action_dist.log_prob(actions)
+    action_log_prob = action_dist.log_prob(actions.squeeze(1))
     ratio = torch.exp(action_log_prob - old_log_prob)
     policy_loss1 = adv * ratio
     policy_loss2 = adv * torch.clamp(ratio, 1 - clip, 1 + clip)
@@ -107,8 +107,6 @@ def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_re
 
 def collect_rollout(env, ppo_network, rollout_length, obs, rms):
     rollout = Rollout(rollout_length, env.num_envs, env.observation_space, env.action_space)
-    rms.update(obs)
-    obs = (obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
     for _ in range(rollout_length):
         obs_tensor = torch.as_tensor(obs).float()
         action, log_prob = ppo_network.policy_network.policy_fn(obs_tensor)
@@ -124,7 +122,7 @@ def collect_rollout(env, ppo_network, rollout_length, obs, rms):
     return rollout, obs
 
 def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, num_epochs, device, max_grad_norm=0.5,
-              clip=0.2, discount=0.99, rnd_discount=0.999, lam=0.95, rnd_reward_coef=1, ent_coef=1e-2, val_coef=1):
+              clip=0.2, discount=0.99, rnd_discount=0.999, lam=0.95, rnd_reward_coef=1, ent_coef=1e-3, val_coef=1):
     with torch.device(device):
         obs, actions, rewards, dones, log_probs, last_obs = rollout.unpack()
         last_obs = np.expand_dims(last_obs, 0)
@@ -138,9 +136,9 @@ def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, n
         val_np = to_numpy(values).reshape(-1, rewards.shape[1])
         rnd_val_np = to_numpy(rnd_values).reshape(-1, rewards.shape[1])
         reg_adv, reg_ret = compute_gae(rewards, val_np, dones, discount, lam)
-        reg_adv = (reg_adv - reg_adv.mean()) / (reg_adv.std() + 1e-8)
         rnd_adv, rnd_ret = compute_gae(intrinsic_rewards, rnd_val_np, dones, rnd_discount, lam)
-        adv = reg_adv + rnd_adv
+        adv = reg_adv# + rnd_adv
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         
         num_samples = obs.shape[0] * obs.shape[1]
         obs = obs.reshape(num_samples, *obs.shape[2:])

@@ -59,9 +59,13 @@ class AtariPolicyNetwork(nn.Module):
         action_dist = Categorical(logits=logits)
         return action_dist
     
-    def policy_fn(self, x):
+    def policy_fn(self, x, det=False):
         # actually choosing the action
-        action_dist = self.policy_dist(x)
+        if not det:
+            action_dist = self.policy_dist(x)
+        if det:
+            action_logits = self(x)
+            return torch.argmax(action_logits, dim=-1), None
         action = action_dist.sample()
         return action, action_dist.log_prob(action) # [B, 1]
 
