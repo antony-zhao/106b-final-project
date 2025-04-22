@@ -6,7 +6,7 @@ from stable_baselines3.common.env_util import make_atari_env
 from torch.distributions import Categorical
 import numpy as np
 
-from models import MLP, AtariConv
+from models import MLP, AtariConv, layer_init
 from ppo import compute_gae, AtariPolicyNetwork, Rollout, PPONetwork
 from utils import to_numpy
 
@@ -30,10 +30,10 @@ class RND(nn.Module):
         return intrinsic_reward, error.mean()
     
 class AtariFeatureModel(nn.Module):
-    def __init__(self, feature_dim=256):
+    def __init__(self, feature_dim=256, num_hidden=1):
         super(AtariFeatureModel, self).__init__()
         self.conv = AtariConv(input_channels=1)
-        self.mlp = MLP(self.conv.output_dim, feature_dim)
+        self.mlp = MLP(self.conv.output_dim, feature_dim, num_hiddens=num_hidden)
     
     def forward(self, obs):
         x = self.conv(obs)
@@ -96,6 +96,7 @@ def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_re
     action_dist = ppo_network.policy_network.policy_dist(obs)
     action_log_prob = action_dist.log_prob(actions.squeeze(1))
     ratio = torch.exp(action_log_prob - old_log_prob)
+    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
     policy_loss1 = adv * ratio
     policy_loss2 = adv * torch.clamp(ratio, 1 - clip, 1 + clip)
     policy_loss = -torch.min(policy_loss1, policy_loss2).mean()
@@ -107,12 +108,20 @@ def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_re
 
 def collect_rollout(env, ppo_network, rollout_length, obs, rms):
     rollout = Rollout(rollout_length, env.num_envs, env.observation_space, env.action_space)
+    rms.update(obs)
+    obs = (obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
+    total_reward = 0
+    num_completed = 0
     for _ in range(rollout_length):
         obs_tensor = torch.as_tensor(obs).float()
         action, log_prob = ppo_network.policy_network.policy_fn(obs_tensor)
         action = to_numpy(action)
         log_prob = to_numpy(log_prob)
-        next_obs, reward, done, _ = env.step(action)
+        next_obs, reward, done, infos = env.step(action)
+        for info in infos:
+            if 'episode' in info.keys():
+                total_reward += info['episode']['r']
+                num_completed += 1
         action = action[:, np.newaxis]
         rollout.add(obs, action, reward, done, log_prob)
         obs = next_obs
@@ -122,13 +131,16 @@ def collect_rollout(env, ppo_network, rollout_length, obs, rms):
     return rollout, obs
 
 def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, num_epochs, device, max_grad_norm=0.5,
-              clip=0.2, discount=0.99, rnd_discount=0.999, lam=0.95, rnd_reward_coef=1, ent_coef=1e-3, val_coef=1):
+              clip=0.2, discount=0.99, rnd_discount=0.999, lam=0.95, rnd_reward_coef=1, ent_coef=1e-3, val_coef=1, rnd_sample_coef=1):
     with torch.device(device):
         obs, actions, rewards, dones, log_probs, last_obs = rollout.unpack()
         last_obs = np.expand_dims(last_obs, 0)
         all_obs = torch.as_tensor(np.concatenate([obs, last_obs])).float()
-        next_obs = all_obs[1:].reshape(-1, *all_obs.shape[2:])
-        intrinsic_rewards, _ = rnd.compute_intrinsic(next_obs) #int_rewards are numpy
+        next_obs = all_obs[1:]
+        intrinsic_rewards = []
+        for i in range(next_obs.shape[0]):
+            intrinsic_rewards.append(rnd.compute_intrinsic(next_obs[i])[0])
+        intrinsic_rewards = np.stack(intrinsic_rewards) #int_rewards are numpy
         intrinsic_rewards = intrinsic_rewards.reshape(rewards.shape) * rnd_reward_coef
         all_obs = all_obs.reshape(-1, *all_obs.shape[2:])
         values, rnd_values = ppo_network.value_network(all_obs)
@@ -137,8 +149,7 @@ def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, n
         rnd_val_np = to_numpy(rnd_values).reshape(-1, rewards.shape[1])
         reg_adv, reg_ret = compute_gae(rewards, val_np, dones, discount, lam)
         rnd_adv, rnd_ret = compute_gae(intrinsic_rewards, rnd_val_np, dones, rnd_discount, lam)
-        adv = reg_adv# + rnd_adv
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        adv = reg_adv + rnd_adv
         
         num_samples = obs.shape[0] * obs.shape[1]
         obs = obs.reshape(num_samples, *obs.shape[2:])
@@ -149,8 +160,8 @@ def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, n
         adv = adv.reshape(num_samples, *adv.shape[2:])
         indices = np.random.permutation(num_samples)
         
-        metrics = {'intrinsic_loss': 0}
-        for _ in range(num_epochs):
+        metrics = {'intrinsic_loss': 0, 'intrinsic_reward': 0}
+        for i in range(num_epochs):
             start_ind = 0
             while start_ind < num_samples:
                 batch_inds = indices[start_ind: min(num_samples, start_ind + minibatch_size)]
@@ -160,11 +171,13 @@ def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, n
                 reg_ret_batch = torch.as_tensor(reg_ret[batch_inds])
                 rnd_ret_batch = torch.as_tensor(rnd_ret[batch_inds])
                 adv_batch = torch.as_tensor(adv[batch_inds])
-                _, int_loss = rnd.compute_intrinsic(obs_batch)
-                metrics['intrinsic_loss'] += to_numpy(int_loss) / (num_samples * num_epochs / minibatch_size)
-                rnd_optim.zero_grad()
-                int_loss.backward()
-                rnd_optim.step()
+                if i == 0:
+                    int_rew, int_loss = rnd.compute_intrinsic(obs_batch[:int(rnd_sample_coef * minibatch_size)])
+                    metrics['intrinsic_loss'] += to_numpy(int_loss) / (num_samples * num_epochs / minibatch_size)
+                    metrics['intrinsic_reward'] += np.sum(int_rew) / (num_samples * num_epochs / minibatch_size) / max(1, np.sum(dones))
+                    rnd_optim.zero_grad()
+                    int_loss.backward()
+                    rnd_optim.step()
                 
                 ppo_loss, metric = compute_rnd_loss(ppo_network, obs_batch, actions_batch, log_probs_batch, reg_ret_batch, rnd_ret_batch, adv_batch,
                                             clip, ent_coef, val_coef)

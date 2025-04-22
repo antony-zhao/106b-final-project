@@ -92,12 +92,17 @@ def compute_gae(rewards, values, dones, discount=0.99, lam=0.95):
     # values is T+1, since it needs to include the value for the next_obs, also purely numpy
     N = rewards.shape[1]
     T = rewards.shape[0]
-    gae_step = np.zeros((N, ), dtype=np.float32)
-    advantages = np.zeros((T, N), dtype=np.float32)
+    next_value = values[-1]
+    advantages = np.zeros_like(rewards)
+    lastgaelam = 0
     for t in reversed(range(T)):
-        delta = rewards[t] + discount * values[t + 1] * (1 - dones[t]) - values[t]
-        gae_step = delta + discount * lam * (1 - dones[t]) * gae_step
-        advantages[t] = gae_step
+        nextnonterminal = 1.0 - dones[t]
+        if t == T - 1:
+            nextvalues = next_value
+        else:
+            nextvalues = values[t + 1]
+        delta = rewards[t] + discount * nextvalues * nextnonterminal - values[t]
+        advantages[t] = lastgaelam = delta + discount * lam * nextnonterminal * lastgaelam
     returns = advantages + values[:-1]
     return advantages, returns
 
