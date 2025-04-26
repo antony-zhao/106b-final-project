@@ -8,29 +8,74 @@ import numpy as np
 
 from models import MLP, AtariConv, layer_init
 from ppo import compute_gae, AtariPolicyNetwork, Rollout, PPONetwork
-from utils import to_numpy
+from utils import to_numpy, get_action_dim, get_obs_shape
+
+class RND_Rollout:
+    obs: np.ndarray
+    actions: np.ndarray
+    rewards: np.ndarray
+    dones: np.ndarray
+    log_probs: np.ndarray
+    last_obs: np.ndarray
+    returns: np.ndarray
+    
+    def __init__(self, rollout_length, num_envs, obs_space, action_space):
+        self.rollout_length = rollout_length
+        self.num_envs = num_envs
+        self.obs_shape = get_obs_shape(obs_space)
+        self.action_dim = get_action_dim(action_space)
+        self.ind = 0
+        self.reset()
+    
+    def reset(self):
+        self.obs = np.zeros((self.rollout_length, self.num_envs, *self.obs_shape), dtype=np.float32)
+        self.actions = np.zeros((self.rollout_length, self.num_envs, self.action_dim), dtype=np.float32)
+        self.rewards = np.zeros((self.rollout_length, self.num_envs), dtype=np.float32)
+        self.intrinsic_rewards = np.zeros((self.rollout_length, self.num_envs), dtype=np.float32)
+        self.dones = np.zeros((self.rollout_length, self.num_envs), dtype=np.float32)
+        self.log_probs = np.zeros((self.rollout_length, self.num_envs), dtype=np.float32)
+        self.returns = 0
+    
+    def add(self, obs, action, reward, int_rew, done, log_prob):
+        self.obs[self.ind] = obs
+        self.actions[self.ind] = action
+        self.rewards[self.ind] = reward
+        self.intrinsic_rewards[self.ind] = int_rew
+        self.dones[self.ind] = done
+        self.log_probs[self.ind] = log_prob
+        self.ind += 1
+        
+    def unpack(self):
+        return self.obs, self.actions, self.rewards, self.intrinsic_rewards, self.dones, self.log_probs, self.last_obs
+
+    def returns_step(self, rewards, discount=0.99):
+        self.returns = self.returns * discount + rewards
+        return self.returns
 
 class RND(nn.Module):
     def __init__(self, feature_model, target_model):
         super(RND, self).__init__()
         self.feature_model = feature_model
         self.feature_model_target = target_model
-        self.rms = RunningMeanStd()
+        # self.rms = RunningMeanStd()
     
-    def compute_intrinsic(self, next_obs):
-        next_obs = next_obs[:, [-1]]
+    def compute_intrinsic(self, next_obs, sample_prob=1):
+        next_obs = torch.clamp(next_obs[:, [-1]], -5, 5)
         features = self.feature_model(next_obs)
         with torch.no_grad():
             target_features = self.feature_model_target(next_obs)
 
-        error = 0.5 * (features - target_features) ** 2
-        intrinsic_reward = to_numpy(error.mean(-1))
-        self.rms.update(intrinsic_reward)
-        intrinsic_reward = (intrinsic_reward) / (np.sqrt(self.rms.var) + 1e-8)
-        return intrinsic_reward, error.mean()
+        error = ((features - target_features) ** 2)
+        intrinsic_reward = to_numpy(error.sum(-1))
+        mask = (torch.rand(error.shape[0]) < sample_prob).float().to(next_obs.device)
+        error = error.mean(-1)
+        loss = (error * mask).sum() / torch.max(torch.sum(mask), torch.tensor(1).to(next_obs.device))
+        # self.rms.update(intrinsic_reward)
+        # intrinsic_reward = (intrinsic_reward) / (np.sqrt(self.rms.var) + 1e-8)
+        return intrinsic_reward, loss
     
 class AtariFeatureModel(nn.Module):
-    def __init__(self, feature_dim=256, num_hidden=1):
+    def __init__(self, feature_dim=512, num_hidden=1):
         super(AtariFeatureModel, self).__init__()
         self.conv = AtariConv(input_channels=1)
         self.mlp = MLP(self.conv.output_dim, feature_dim, num_hiddens=num_hidden)
@@ -80,15 +125,15 @@ class AtariRNDValueNetwork(nn.Module):
         self.act = act()
     
     def forward(self, x):
-        x = self.conv(x)
+        x = self.conv(x / 255)
         x = x.view(-1, self.conv.output_dim)
         x = self.act(self.mlp(x))
         v1 = self.val1(x)
         v2 = self.val2(x)
         return v1, v2
 
-def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_ret, rnd_ret, adv,
-                     clip=0.2, ent_coef=0, val_coef=1):
+def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_ret, rnd_ret, reg_adv, rnd_adv,
+                     clip=0.2, ent_coef=0, val_coef=1, ext_coef=2, rnd_coef=1):
     # compute_gae is numpy only
     values, rnd_values = ppo_network.value_network(obs)
     val_loss = F.mse_loss(reg_ret, values.squeeze(1)) + F.mse_loss(rnd_ret, rnd_values.squeeze(1))
@@ -96,7 +141,9 @@ def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_re
     action_dist = ppo_network.policy_network.policy_dist(obs)
     action_log_prob = action_dist.log_prob(actions.squeeze(1))
     ratio = torch.exp(action_log_prob - old_log_prob)
-    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+    reg_adv = (reg_adv - reg_adv.mean()) / (reg_adv.std() + 1e-8)
+    rnd_adv = (rnd_adv - rnd_adv.mean()) / (rnd_adv.std() + 1e-8)
+    adv = reg_adv * ext_coef + rnd_adv * rnd_coef
     policy_loss1 = adv * ratio
     policy_loss2 = adv * torch.clamp(ratio, 1 - clip, 1 + clip)
     policy_loss = -torch.min(policy_loss1, policy_loss2).mean()
@@ -106,10 +153,10 @@ def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_re
     loss = ent_loss * ent_coef + policy_loss + val_loss * val_coef
     return loss, {'policy_loss': policy_loss, 'entropy_loss': ent_loss, 'value_loss': val_loss}
 
-def collect_rollout(env, ppo_network, rollout_length, obs, rms):
-    rollout = Rollout(rollout_length, env.num_envs, env.observation_space, env.action_space)
-    rms.update(obs)
-    obs = (obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
+def collect_rollout(env, ppo_network, rnd, rollout_length, obs, rms):
+    rollout = RND_Rollout(rollout_length, env.num_envs, env.observation_space, env.action_space)
+    # rms.update(obs.mean((2, 3), keepdims=True))
+    obs = obs#(obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
     total_reward = 0
     num_completed = 0
     for _ in range(rollout_length):
@@ -118,38 +165,37 @@ def collect_rollout(env, ppo_network, rollout_length, obs, rms):
         action = to_numpy(action)
         log_prob = to_numpy(log_prob)
         next_obs, reward, done, infos = env.step(action)
+        intrinsic_reward, _ = rnd.compute_intrinsic(torch.as_tensor((next_obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)).float())
+        next_obs = next_obs#(next_obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
         for info in infos:
             if 'episode' in info.keys():
                 total_reward += info['episode']['r']
                 num_completed += 1
         action = action[:, np.newaxis]
-        rollout.add(obs, action, reward, done, log_prob)
+        rollout.add(obs, action, reward, intrinsic_reward, done, log_prob)
         obs = next_obs
-        rms.update(obs)
-        obs = (obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
+        # rms.update(obs.mean((2, 3), keepdims=True))
     rollout.last_obs = obs
     return rollout, obs
-
-def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, num_epochs, device, max_grad_norm=0.5,
-              clip=0.2, discount=0.99, rnd_discount=0.999, lam=0.95, rnd_reward_coef=1, ent_coef=1e-3, val_coef=1, rnd_sample_coef=1):
+    
+def train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_optim, rnd_optim, minibatch_size, num_epochs, device, max_grad_norm=0.5,
+              clip=0.2, discount=0.999, rnd_discount=0.99, lam=0.95, extrinsic_coef=2, rnd_coef=1, ent_coef=1e-3, val_coef=1):
     with torch.device(device):
-        obs, actions, rewards, dones, log_probs, last_obs = rollout.unpack()
+        obs, actions, rewards, intrinsic_rewards, dones, log_probs, last_obs = rollout.unpack()
+        obs_rms.update(obs.reshape(-1, *obs.shape[2:]))
         last_obs = np.expand_dims(last_obs, 0)
         all_obs = torch.as_tensor(np.concatenate([obs, last_obs])).float()
-        next_obs = all_obs[1:]
-        intrinsic_rewards = []
-        for i in range(next_obs.shape[0]):
-            intrinsic_rewards.append(rnd.compute_intrinsic(next_obs[i])[0])
-        intrinsic_rewards = np.stack(intrinsic_rewards) #int_rewards are numpy
-        intrinsic_rewards = intrinsic_rewards.reshape(rewards.shape) * rnd_reward_coef
+        intrinsic_returns = np.array([rollout.returns_step(intrinsic_reward) for intrinsic_reward in intrinsic_rewards[::-1]])
+        rnd_rms.update(intrinsic_returns.flatten())
+        intrinsic_rewards = intrinsic_rewards / (np.sqrt(rnd_rms.var) + 1e-8)
         all_obs = all_obs.reshape(-1, *all_obs.shape[2:])
         values, rnd_values = ppo_network.value_network(all_obs)
         
         val_np = to_numpy(values).reshape(-1, rewards.shape[1])
         rnd_val_np = to_numpy(rnd_values).reshape(-1, rewards.shape[1])
         reg_adv, reg_ret = compute_gae(rewards, val_np, dones, discount, lam)
-        rnd_adv, rnd_ret = compute_gae(intrinsic_rewards, rnd_val_np, dones, rnd_discount, lam)
-        adv = reg_adv + rnd_adv
+        rnd_adv, rnd_ret = compute_gae(intrinsic_rewards, rnd_val_np, np.zeros_like(dones), rnd_discount, lam)
+        # adv = reg_adv + rnd_adv
         
         num_samples = obs.shape[0] * obs.shape[1]
         obs = obs.reshape(num_samples, *obs.shape[2:])
@@ -157,11 +203,12 @@ def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, n
         log_probs = log_probs.reshape(num_samples, *log_probs.shape[2:])
         reg_ret = reg_ret.reshape(num_samples, *reg_ret.shape[2:])
         rnd_ret = rnd_ret.reshape(num_samples, *rnd_ret.shape[2:])
-        adv = adv.reshape(num_samples, *adv.shape[2:])
-        indices = np.random.permutation(num_samples)
+        reg_adv = reg_adv.reshape(num_samples, *reg_adv.shape[2:])
+        rnd_adv = rnd_adv.reshape(num_samples, *rnd_adv.shape[2:])
         
         metrics = {'intrinsic_loss': 0, 'intrinsic_reward': 0}
         for i in range(num_epochs):
+            indices = np.random.permutation(num_samples)
             start_ind = 0
             while start_ind < num_samples:
                 batch_inds = indices[start_ind: min(num_samples, start_ind + minibatch_size)]
@@ -170,16 +217,17 @@ def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, n
                 log_probs_batch = torch.as_tensor(log_probs[batch_inds])
                 reg_ret_batch = torch.as_tensor(reg_ret[batch_inds])
                 rnd_ret_batch = torch.as_tensor(rnd_ret[batch_inds])
-                adv_batch = torch.as_tensor(adv[batch_inds])
-                if i == 0:
-                    int_rew, int_loss = rnd.compute_intrinsic(obs_batch[:int(rnd_sample_coef * minibatch_size)])
+                reg_adv_batch = torch.as_tensor(reg_adv[batch_inds])
+                rnd_adv_batch = torch.as_tensor(rnd_adv[batch_inds])
+                if start_ind == 0:
+                    int_rew, int_loss = rnd.compute_intrinsic(torch.as_tensor((to_numpy(obs_batch) - obs_rms.mean) / (np.sqrt(obs_rms.var) + 1e-8)).float())
                     metrics['intrinsic_loss'] += to_numpy(int_loss) / (num_samples * num_epochs / minibatch_size)
-                    metrics['intrinsic_reward'] += np.sum(int_rew) / (num_samples * num_epochs / minibatch_size) / max(1, np.sum(dones))
+                    metrics['intrinsic_reward'] += np.sum(intrinsic_rewards) / (num_samples * num_epochs / minibatch_size)
                     rnd_optim.zero_grad()
                     int_loss.backward()
                     rnd_optim.step()
                 
-                ppo_loss, metric = compute_rnd_loss(ppo_network, obs_batch, actions_batch, log_probs_batch, reg_ret_batch, rnd_ret_batch, adv_batch,
+                ppo_loss, metric = compute_rnd_loss(ppo_network, obs_batch, actions_batch, log_probs_batch, reg_ret_batch, rnd_ret_batch, reg_adv_batch, rnd_adv_batch,
                                             clip, ent_coef, val_coef)
                 for key in metric.keys():
                     if key not in metrics:
@@ -188,6 +236,7 @@ def train_rnd(rollout, ppo_network, rnd, ppo_optim, rnd_optim, minibatch_size, n
                 ppo_optim.zero_grad()
                 ppo_loss.backward()
                 torch.nn.utils.clip_grad_norm_(ppo_network.parameters(), max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(rnd.parameters(), max_grad_norm)
                 ppo_optim.step()
                 start_ind += minibatch_size
         return metrics

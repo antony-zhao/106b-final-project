@@ -1,5 +1,5 @@
 from stable_baselines3.common.env_util import make_atari_env, make_vec_env
-from stable_baselines3.common.vec_env import VecTransposeImage, VecFrameStack
+from stable_baselines3.common.vec_env import VecTransposeImage, VecFrameStack, SubprocVecEnv
 from stable_baselines3.common.atari_wrappers import AtariWrapper
 import torch
 from torch import optim
@@ -20,16 +20,13 @@ from stable_baselines3.common.atari_wrappers import (
     NoopResetEnv,
 )
 
-gym.register_envs(ale_py)
-
 def main(args):
+    gym.register_envs(ale_py)
     torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    logger = Logger(f'logs/{args.env}')
-    
+    np.random.seed(args.seed)    
     device = ('cuda' if torch.cuda.is_available() else 'cpu')
     
-    def make_env(gym_id, seed, time_limit=18000):
+    def make_env(gym_id, seed, time_limit=4500):
         def thunk():
             env = gym.make(gym_id, render_mode='rgb_array')
             env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -49,7 +46,7 @@ def main(args):
     
     # env = make_atari_env(f'ALE/{args.env}-v5', args.num_envs, args.seed, env_kwargs={'frameskip': 1})
     # env = VecTransposeImage(VecFrameStack(env, 4))
-    env = make_vec_env(make_env(f'ALE/{args.env}-v5', args.seed), args.num_envs, args.seed)
+    env = make_vec_env(make_env(f'ALE/{args.env}-v5', args.seed), args.num_envs, args.seed, vec_env_cls=SubprocVecEnv, vec_env_kwargs=dict(start_method='spawn'))
     # eval_env = make_atari_env(f'ALE/{args.env}-v5', 1, args.seed, wrapper_kwargs={'terminal_on_life_loss': False, 'clip_reward': False}, env_kwargs={'frameskip': 1})
     # eval_env = VecTransposeImage(VecFrameStack(eval_env, 4))
     eval_env = make_vec_env(make_env(f'ALE/{args.env}-v5', args.seed), 1, args.seed)
@@ -61,12 +58,13 @@ def main(args):
         num_completed = 0
         frames = []
         while not done:
-            obs = (obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
+            obs = obs#(obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
             obs = torch.as_tensor(obs).to(device).float()
             intrinsic_reward, _ = rnd.compute_intrinsic(obs)
-            total_reward += np.sum(intrinsic_reward)
-            action, _ = ppo_network.policy_network.policy_fn(obs, det=True)
+            # total_reward += np.sum(intrinsic_reward)
+            action, _ = ppo_network.policy_network.policy_fn(obs, det=False)
             obs, reward, done, infos = eval_env.step(to_numpy(action))
+            total_reward += reward
             frames.append(eval_env.render())
             for info in infos:
                 if 'episode' in info.keys():
@@ -91,19 +89,25 @@ def main(args):
         for module in ppo_network.modules():
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
                 layer_init(module)
+        for module in rnd.modules():
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                layer_init(module)
         ppo_opt = optim.Adam(ppo_network.parameters(), lr=args.lr, eps=1e-5)
     
-        rms = RunningMeanStd()
+        obs_rms = RunningMeanStd() # TODO, only normalize per channel dimension, so need to slightly modify the RMS code somehow
+        rnd_rms = RunningMeanStd()
         obs = env.reset()
-        for _ in range(100):
+        for _ in range(50):
             action = [env.action_space.sample() for _ in range(args.num_envs)]
             obs, _, _, _ = env.step(action)
-            rms.update(obs)
+            obs_rms.update(obs) #
         
         total_updates = args.timesteps // (args.num_envs * args.rollout_length)
+        obs = obs
+        logger = Logger(f'logs/{args.env}')
         for i in range(total_updates):
-            rollout, obs = collect_rollout(env, ppo_network, args.rollout_length, obs, rms)
-            metrics = train_rnd(rollout, ppo_network, rnd, ppo_opt, rnd_opt, args.minibatch_size, args.num_epochs, device, 
+            rollout, obs = collect_rollout(env, ppo_network, rnd, args.rollout_length, obs, obs_rms)
+            metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.minibatch_size, args.num_epochs, device, 
                                 max_grad_norm=args.max_grad_norm, clip=args.clip, rnd_reward_coef=1, ent_coef=args.ent_coef, val_coef=args.val_coef, rnd_sample_coef=32 / args.num_envs)
             anneal_lr(ppo_opt, args.lr, i, total_updates)
             logger.add_metrics(metrics)
@@ -125,7 +129,7 @@ if __name__ == '__main__':
     parser.add_argument('--discount', type=float, default=0.99)
     parser.add_argument('--clip', type=float, default=0.1)
     parser.add_argument('--val-coef', type=float, default=0.5)
-    parser.add_argument('--ent-coef', type=float, default=1e-2)
+    parser.add_argument('--ent-coef', type=float, default=1e-3)
     parser.add_argument('--max-grad-norm', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--rollout-length', type=int, default=128)
@@ -134,7 +138,7 @@ if __name__ == '__main__':
     parser.add_argument('--log-every', type=int, default=4)
     parser.add_argument('--num-epochs', type=int, default=4)
     parser.add_argument('--num-minibatches', type=int, default=4)
-    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=1)
     args = parser.parse_args()
     args.minibatch_size = (args.num_envs * args.rollout_length) // args.num_minibatches
     main(args)

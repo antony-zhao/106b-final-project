@@ -49,7 +49,7 @@ class AtariPolicyNetwork(nn.Module):
         self.mlp = MLP(self.conv.output_dim, num_actions)
     
     def forward(self, x):
-        x = self.conv(x)
+        x = self.conv(x / 255.0)
         x = x.reshape(-1, self.conv.output_dim)
         x = self.mlp(x)
         return x
@@ -76,7 +76,7 @@ class AtariValueNetwork(nn.Module):
         self.mlp = MLP(self.conv.output_dim, num_actions)
     
     def forward(self, x):
-        x = self.conv(x)
+        x = self.conv(x / 255.0)
         x = x.view(-1, self.conv.output_dim)
         x = self.mlp(x)
         return x # [B, 1]
