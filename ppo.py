@@ -2,7 +2,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, TanhTransform
-import copy
 import numpy as np
 
 from models import MLP, AtariConv
@@ -106,5 +105,87 @@ def compute_gae(rewards, values, dones, discount=0.99, lam=0.95):
     returns = advantages + values[:-1]
     return advantages, returns
 
-def compute_ppo_loss(states, rewards, dones, discount=0.99, lam=0.95):
-    pass
+def compute_ppo_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, ret, adv,
+                     clip=0.2, ent_coef=0, val_coef=1):
+    # compute_gae is numpy only
+    values = ppo_network.value_network(obs)
+    val_loss = F.mse_loss(ret, values.squeeze(1))
+    
+    action_dist = ppo_network.policy_network.policy_dist(obs)
+    action_log_prob = action_dist.log_prob(actions.squeeze(1))
+    ratio = torch.exp(action_log_prob - old_log_prob)
+    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+    policy_loss1 = adv * ratio
+    policy_loss2 = adv * torch.clamp(ratio, 1 - clip, 1 + clip)
+    policy_loss = -torch.min(policy_loss1, policy_loss2).mean()
+    
+    ent_loss = -action_dist.entropy().mean()
+    
+    loss = ent_loss * ent_coef + policy_loss + val_loss * val_coef
+    return loss, {'policy_loss': policy_loss, 'entropy_loss': ent_loss, 'value_loss': val_loss}
+
+def collect_rollout(env, ppo_network, rollout_length, obs):
+    rollout = Rollout(rollout_length, env.num_envs, env.observation_space, env.action_space)
+    total_reward = 0
+    num_completed = 0
+    for _ in range(rollout_length):
+        obs_tensor = torch.as_tensor(obs).float()
+        action, log_prob = ppo_network.policy_network.policy_fn(obs_tensor)
+        action = to_numpy(action)
+        log_prob = to_numpy(log_prob)
+        next_obs, reward, done, infos = env.step(action)
+        next_obs = next_obs
+        for info in infos:
+            if 'episode' in info.keys():
+                total_reward += info['episode']['r']
+                num_completed += 1
+        action = action[:, np.newaxis]
+        rollout.add(obs, action, reward, done, log_prob)
+        obs = next_obs
+    rollout.last_obs = obs
+    return rollout, obs
+
+def train_ppo(rollout, ppo_network, ppo_optim, num_minibatches, num_epochs, device, max_grad_norm=0.5,
+              clip=0.2, discount=0.99, lam=0.95, ent_coef=1e-3, val_coef=1):
+    with torch.device(device):
+        obs, actions, rewards, dones, log_probs, last_obs = rollout.unpack()
+        last_obs = np.expand_dims(last_obs, 0)
+        all_obs = torch.as_tensor(np.concatenate([obs, last_obs])).float()
+        all_obs = all_obs.reshape(-1, *all_obs.shape[2:])
+        values = ppo_network.value_network(all_obs)
+        
+        val_np = to_numpy(values).reshape(-1, rewards.shape[1])
+        adv, ret = compute_gae(rewards, val_np, dones, discount, lam)
+        
+        num_samples = obs.shape[0] * obs.shape[1]
+        obs = obs.reshape(num_samples, *obs.shape[2:])
+        actions = actions.reshape(num_samples, *actions.shape[2:])
+        log_probs = log_probs.reshape(num_samples, *log_probs.shape[2:])
+        ret = ret.reshape(num_samples, *ret.shape[2:])
+        adv = adv.reshape(num_samples, *adv.shape[2:])
+        
+        metrics = {}
+        minibatch_size = num_samples // num_minibatches
+        for i in range(num_epochs):
+            indices = np.random.permutation(num_samples)
+            start_ind = 0
+            while start_ind < num_samples:
+                batch_inds = indices[start_ind: min(num_samples, start_ind + minibatch_size)]
+                obs_batch = torch.as_tensor(obs[batch_inds])
+                actions_batch = torch.as_tensor(actions[batch_inds])
+                log_probs_batch = torch.as_tensor(log_probs[batch_inds])
+                ret_batch = torch.as_tensor(ret[batch_inds])
+                adv_batch = torch.as_tensor(adv[batch_inds])
+                
+                ppo_loss, metric = compute_ppo_loss(ppo_network, obs_batch, actions_batch, log_probs_batch, ret_batch, adv_batch,
+                                            clip, ent_coef, val_coef)
+                for key in metric.keys():
+                    if key not in metrics:
+                        metrics[key] = 0
+                    metrics[key] += to_numpy(metric[key]) / (num_samples * num_epochs / minibatch_size)
+                ppo_optim.zero_grad()
+                ppo_loss.backward()
+                torch.nn.utils.clip_grad_norm_(ppo_network.parameters(), max_grad_norm)
+                ppo_optim.step()
+                start_ind += minibatch_size
+        return metrics

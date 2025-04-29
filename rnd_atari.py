@@ -107,8 +107,8 @@ def main(args):
         logger = Logger(f'logs/{args.env}')
         for i in range(total_updates):
             rollout, obs = collect_rollout(env, ppo_network, rnd, args.rollout_length, obs, obs_rms)
-            metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.minibatch_size, args.num_epochs, device, 
-                                max_grad_norm=args.max_grad_norm, clip=args.clip, rnd_reward_coef=1, ent_coef=args.ent_coef, val_coef=args.val_coef, rnd_sample_coef=32 / args.num_envs)
+            metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.num_minibatches, args.num_epochs, device, rnd_coef=1,
+                                max_grad_norm=args.max_grad_norm, clip=args.clip, ent_coef=args.ent_coef, val_coef=args.val_coef, sample_prob=32 / args.num_envs)
             anneal_lr(ppo_opt, args.lr, i, total_updates)
             logger.add_metrics(metrics)
             train_rew = np.sum(rollout.rewards) / max(1, np.sum(rollout.dones))
@@ -140,6 +140,5 @@ if __name__ == '__main__':
     parser.add_argument('--num-minibatches', type=int, default=4)
     parser.add_argument('--seed', type=int, default=1)
     args = parser.parse_args()
-    args.minibatch_size = (args.num_envs * args.rollout_length) // args.num_minibatches
     main(args)
     

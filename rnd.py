@@ -1,13 +1,10 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-import gymnasium as gym
-from stable_baselines3.common.env_util import make_atari_env
-from torch.distributions import Categorical
 import numpy as np
 
 from models import MLP, AtariConv, layer_init
-from ppo import compute_gae, AtariPolicyNetwork, Rollout, PPONetwork
+from ppo import compute_gae, PPONetwork, AtariPolicyNetwork
 from utils import to_numpy, get_action_dim, get_obs_shape
 
 class RND_Rollout:
@@ -53,14 +50,14 @@ class RND_Rollout:
         return self.returns
 
 class RND(nn.Module):
-    def __init__(self, feature_model, target_model):
+    def __init__(self, feature_model, target_model, obs_channels=1):
         super(RND, self).__init__()
         self.feature_model = feature_model
         self.feature_model_target = target_model
-        # self.rms = RunningMeanStd()
+        self.obs_channels = obs_channels
     
     def compute_intrinsic(self, next_obs, sample_prob=1):
-        next_obs = torch.clamp(next_obs[:, [-1]], -5, 5)
+        next_obs = torch.clamp(next_obs[:, -self.obs_channels:], -5, 5)
         features = self.feature_model(next_obs)
         with torch.no_grad():
             target_features = self.feature_model_target(next_obs)
@@ -70,8 +67,6 @@ class RND(nn.Module):
         mask = (torch.rand(error.shape[0]) < sample_prob).float().to(next_obs.device)
         error = error.mean(-1)
         loss = (error * mask).sum() / torch.max(torch.sum(mask), torch.tensor(1).to(next_obs.device))
-        # self.rms.update(intrinsic_reward)
-        # intrinsic_reward = (intrinsic_reward) / (np.sqrt(self.rms.var) + 1e-8)
         return intrinsic_reward, loss
     
 class AtariFeatureModel(nn.Module):
@@ -136,10 +131,12 @@ def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_re
                      clip=0.2, ent_coef=0, val_coef=1, ext_coef=2, rnd_coef=1):
     # compute_gae is numpy only
     values, rnd_values = ppo_network.value_network(obs)
-    val_loss = F.mse_loss(reg_ret, values.squeeze(1)) + F.mse_loss(rnd_ret, rnd_values.squeeze(1))
+    val_loss = F.mse_loss(reg_ret, values.squeeze(1)) + F.mse_loss(rnd_ret, rnd_values.squeeze(1)) * rnd_coef
     
     action_dist = ppo_network.policy_network.policy_dist(obs)
     action_log_prob = action_dist.log_prob(actions.squeeze(1))
+    if len(action_log_prob.shape) > 1:
+        action_log_prob = action_log_prob.sum(-1)
     ratio = torch.exp(action_log_prob - old_log_prob)
     reg_adv = (reg_adv - reg_adv.mean()) / (reg_adv.std() + 1e-8)
     rnd_adv = (rnd_adv - rnd_adv.mean()) / (rnd_adv.std() + 1e-8)
@@ -155,8 +152,6 @@ def compute_rnd_loss(ppo_network: PPONetwork, obs, actions, old_log_prob, reg_re
 
 def collect_rollout(env, ppo_network, rnd, rollout_length, obs, rms):
     rollout = RND_Rollout(rollout_length, env.num_envs, env.observation_space, env.action_space)
-    # rms.update(obs.mean((2, 3), keepdims=True))
-    obs = obs#(obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
     total_reward = 0
     num_completed = 0
     for _ in range(rollout_length):
@@ -166,7 +161,7 @@ def collect_rollout(env, ppo_network, rnd, rollout_length, obs, rms):
         log_prob = to_numpy(log_prob)
         next_obs, reward, done, infos = env.step(action)
         intrinsic_reward, _ = rnd.compute_intrinsic(torch.as_tensor((next_obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)).float())
-        next_obs = next_obs#(next_obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)
+        next_obs = next_obs
         for info in infos:
             if 'episode' in info.keys():
                 total_reward += info['episode']['r']
@@ -174,12 +169,11 @@ def collect_rollout(env, ppo_network, rnd, rollout_length, obs, rms):
         action = action[:, np.newaxis]
         rollout.add(obs, action, reward, intrinsic_reward, done, log_prob)
         obs = next_obs
-        # rms.update(obs.mean((2, 3), keepdims=True))
     rollout.last_obs = obs
     return rollout, obs
     
-def train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_optim, rnd_optim, minibatch_size, num_epochs, device, max_grad_norm=0.5,
-              clip=0.2, discount=0.999, rnd_discount=0.99, lam=0.95, extrinsic_coef=2, rnd_coef=1, ent_coef=1e-3, val_coef=1):
+def train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_optim, rnd_optim, num_minibatches, num_epochs, device, max_grad_norm=0.5,
+              clip=0.2, discount=0.999, rnd_discount=0.99, lam=0.95, ent_coef=1e-3, val_coef=1, sample_prob=1, ext_coef=2, rnd_coef=1):
     with torch.device(device):
         obs, actions, rewards, intrinsic_rewards, dones, log_probs, last_obs = rollout.unpack()
         obs_rms.update(obs.reshape(-1, *obs.shape[2:]))
@@ -195,7 +189,6 @@ def train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_optim, rnd_optim,
         rnd_val_np = to_numpy(rnd_values).reshape(-1, rewards.shape[1])
         reg_adv, reg_ret = compute_gae(rewards, val_np, dones, discount, lam)
         rnd_adv, rnd_ret = compute_gae(intrinsic_rewards, rnd_val_np, np.zeros_like(dones), rnd_discount, lam)
-        # adv = reg_adv + rnd_adv
         
         num_samples = obs.shape[0] * obs.shape[1]
         obs = obs.reshape(num_samples, *obs.shape[2:])
@@ -205,6 +198,7 @@ def train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_optim, rnd_optim,
         rnd_ret = rnd_ret.reshape(num_samples, *rnd_ret.shape[2:])
         reg_adv = reg_adv.reshape(num_samples, *reg_adv.shape[2:])
         rnd_adv = rnd_adv.reshape(num_samples, *rnd_adv.shape[2:])
+        minibatch_size = num_samples // num_minibatches
         
         metrics = {'intrinsic_loss': 0, 'intrinsic_reward': 0}
         for i in range(num_epochs):
@@ -220,7 +214,7 @@ def train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_optim, rnd_optim,
                 reg_adv_batch = torch.as_tensor(reg_adv[batch_inds])
                 rnd_adv_batch = torch.as_tensor(rnd_adv[batch_inds])
                 if start_ind == 0:
-                    int_rew, int_loss = rnd.compute_intrinsic(torch.as_tensor((to_numpy(obs_batch) - obs_rms.mean) / (np.sqrt(obs_rms.var) + 1e-8)).float())
+                    _, int_loss = rnd.compute_intrinsic(torch.as_tensor((to_numpy(obs_batch) - obs_rms.mean) / (np.sqrt(obs_rms.var) + 1e-8)).float(), sample_prob)
                     metrics['intrinsic_loss'] += to_numpy(int_loss) / (num_samples * num_epochs / minibatch_size)
                     metrics['intrinsic_reward'] += np.sum(intrinsic_rewards) / (num_samples * num_epochs / minibatch_size)
                     rnd_optim.zero_grad()
@@ -228,7 +222,7 @@ def train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_optim, rnd_optim,
                     rnd_optim.step()
                 
                 ppo_loss, metric = compute_rnd_loss(ppo_network, obs_batch, actions_batch, log_probs_batch, reg_ret_batch, rnd_ret_batch, reg_adv_batch, rnd_adv_batch,
-                                            clip, ent_coef, val_coef)
+                                            clip, ent_coef, val_coef, ext_coef, rnd_coef)
                 for key in metric.keys():
                     if key not in metrics:
                         metrics[key] = 0
