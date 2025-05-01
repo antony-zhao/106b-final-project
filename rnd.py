@@ -87,8 +87,9 @@ class RunningMeanStd(object):
         self.mean = np.zeros(shape, 'float32')
         self.var = np.ones(shape, 'float32')
         self.count = epsilon
-
-
+        self.samples = []
+        self.update_after = 32
+        
     def update(self, x):
         batch_mean, batch_std, batch_count = np.mean(x, axis=0), np.std(x, axis=0), x.shape[0]
         batch_var = np.square(batch_std)
