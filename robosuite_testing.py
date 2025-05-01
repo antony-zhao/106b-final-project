@@ -31,7 +31,7 @@ class RobosuitePolicy(nn.Module):
         )
         self.output_dim = self.compute_output_dim(in_channels, camera_dim)
         self.mlp = MLP(self.output_dim, n_actions, act=nn.Tanh, hidden_dim=64)
-        self.log_std = nn.Parameter(torch.zeros(n_actions))
+        self.log_std = nn.Parameter(-torch.ones(n_actions))
         
     def compute_output_dim(self, input_channels, camera_dim):
         x = torch.zeros(1, input_channels, camera_dim, camera_dim)
@@ -132,7 +132,7 @@ def collect_rollout(env, ppo_network, rnd, rollout_length, obs, rms):
         rollout.add(obs, action, reward, intrinsic_reward, done, log_prob)
         obs = next_obs
     rollout.last_obs = obs
-    return rollout, obs
+    return rollout, obs, total_reward / num_completed if num_completed > 0 else None
 
 def main(args):
     torch.manual_seed(args.seed)
@@ -157,7 +157,7 @@ def main(args):
                 camera_widths=camera_dim,
                 reward_shaping=True,
                 hard_reset=False,
-                horizon=200,
+                horizon=256,
                 control_freq=10,
                 table_full_size=(0.8, 2.0, 0.05)
             )
@@ -200,9 +200,9 @@ def main(args):
     agentview_image is 256, 256, 3
     '''
 
-    def transform_obs(obs, camera_name='frontview_image'):
+    def transform_obs(obs, rms, camera_name='agentview_image'):
         image = np.flip(obs[camera_name], 0).mean(-1, keepdims=True) / 255
-        proprio = obs['robot0_proprio-state']
+        proprio = (obs['robot0_proprio-state'] - rms.mean) / (np.sqrt(rms.var) + 1e-8)
         # object_state = obs['object-state']
         # additional = np.concatenate([proprio, object_state])
         dim = image.shape[0] * image.shape[1]
@@ -229,13 +229,13 @@ def main(args):
         frames = []
         while not done:
             obs = torch.as_tensor(obs).to(device).float()
-            action, _ = ppo_network.policy_network.policy_fn(obs, det=False)
+            action, _ = ppo_network.policy_network.policy_fn(obs, det=True)
             # action[:, 0] = 0
             action = torch.tanh(action)
             obs, reward, term, trunc, infos = eval_env.step(to_numpy(action[0]))
             done = term or trunc
             total_reward += reward
-            frames.append(np.flip(eval_env.env.env.env.env._get_observations()['frontview_image'], 0))
+            frames.append(np.flip(eval_env.env.env.env.env._get_observations()['agentview_image'], 0))
             for info in infos:
                 if 'episode' in info:
                     total_reward += infos['episode']['r']
@@ -258,13 +258,17 @@ def main(args):
         layers = [module for module in policy.modules() if isinstance(module, (nn.Linear, nn.Conv2d))]
         for i, module in enumerate(layers):
             if isinstance(module, (nn.Conv2d, nn.Linear)):
-                if i < len(layers) - 1:
-                    layer_init(module)
-                else:
-                    layer_init(module, std=0.01)
-        for module in value.modules():
-            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                # if i < len(layers) - 1:
                 layer_init(module)
+                # else:
+                    # layer_init(module, std=0.01)
+        layers = [module for module in value.modules() if isinstance(module, (nn.Linear, nn.Conv2d))]
+        for i, module in enumerate(layers):
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                # if i < len(layers) - 1:
+                layer_init(module)
+                # else:
+                #     layer_init(module, std=1.0)
         ppo_network = PPONetwork(policy, value)
         for module in rnd.modules():
             if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
@@ -283,14 +287,15 @@ def main(args):
         obs = obs
         logger = Logger(f'logs/{args.env}')
         for i in range(total_updates):
-            rollout, obs = collect_rollout(env, ppo_network, rnd, args.rollout_length, obs, obs_rms)
+            rollout, obs, train_rew = collect_rollout(env, ppo_network, rnd, args.rollout_length, obs, obs_rms)
             metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.num_minibatches, args.num_epochs, device, rnd_coef=0, discount=0.99,
                                 max_grad_norm=args.max_grad_norm, clip=args.clip, ent_coef=args.ent_coef, val_coef=args.val_coef, sample_prob=32 / args.num_envs)
             anneal_lr(ppo_opt, args.lr, i, total_updates)
             logger.add_metrics(metrics)
-            train_rew = np.sum(rollout.rewards) / max(1, np.sum(rollout.dones))
+            # train_rew = np.sum(rollout.rewards) / args.num_envs
             print(f'{i * args.num_envs * args.rollout_length}: {train_rew}')
-            logger.add_scalar('train_reward', train_rew)
+            if train_rew is not None:
+                logger.add_scalar('train_reward', train_rew)
             if i % 10 == 0:
                 eval_reward, frames = eval(ppo_network, eval_env)
                 print(f'epoch {i}: {np.mean(eval_reward)}')
@@ -303,15 +308,15 @@ if __name__ == '__main__':
     from argparse import ArgumentParser
     parser = ArgumentParser()
     parser.add_argument('--env', type=str, default='Lift') 
-    parser.add_argument('--camera-dim', type=int, default=84)
+    parser.add_argument('--camera-dim', type=int, default=100)
     parser.add_argument('--discount', type=float, default=0.99)
     parser.add_argument('--clip', type=float, default=0.1)
     parser.add_argument('--val-coef', type=float, default=0.5)
-    parser.add_argument('--ent-coef', type=float, default=1e-2)
+    parser.add_argument('--ent-coef', type=float, default=1e-3)
     parser.add_argument('--max-grad-norm', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--rollout-length', type=int, default=256)
-    parser.add_argument('--num-envs', type=int, default=32)
+    parser.add_argument('--num-envs', type=int, default=24)
     parser.add_argument('--timesteps', type=int, default=500_000_000)
     parser.add_argument('--num-epochs', type=int, default=4)
     parser.add_argument('--num-minibatches', type=int, default=4)
