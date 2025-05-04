@@ -69,7 +69,7 @@ class RobosuitePolicy(nn.Module):
         super().__init__()
         self.core = RobosuiteCore(camera_dim=camera_dim, framestack=framestack, act=act)
         self.action_mean = nn.Linear(self.core.hidden, n_actions)
-        self.log_std = nn.Parameter(torch.zeros(n_actions))
+        self.log_std = nn.Parameter(-torch.ones(n_actions))
     
     def forward(self, x):
         x = self.core(x)
@@ -159,7 +159,8 @@ def main(args):
                 hard_reset=False,
                 horizon=256,
                 control_freq=10,
-                table_full_size=(0.8, 2.0, 0.05)
+                table_full_size=(0.8, 2.0, 0.05),
+                table_offset=(0, 0, 0.6)
             )
             # if not eval:
             env = DomainRandomizationWrapper(env, seed=seed, randomize_color=False, randomize_every_n_steps=0)
@@ -278,6 +279,7 @@ def main(args):
             obs, _, _, _ = env.step(action)
             obs_rms.update(obs)
         
+        obs = env.reset()
         total_updates = args.timesteps // (args.num_envs * args.rollout_length)
         logger = Logger(f'logs/{args.env}')
         for i in range(total_updates):
@@ -310,11 +312,11 @@ if __name__ == '__main__':
     parser.add_argument('--max-grad-norm', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--rollout-length', type=int, default=256)
-    parser.add_argument('--num-envs', type=int, default=32)
-    parser.add_argument('--timesteps', type=int, default=500_000_000)
+    parser.add_argument('--num-envs', type=int, default=1)
+    parser.add_argument('--timesteps', type=int, default=50_000_000)
     parser.add_argument('--num-epochs', type=int, default=4)
     parser.add_argument('--num-minibatches', type=int, default=4)
-    parser.add_argument('--framestack', type=int, default=4)
+    parser.add_argument('--framestack', type=int, default=5)
     parser.add_argument('--seed', type=int, default=1)
     args = parser.parse_args()
     main(args)
