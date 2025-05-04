@@ -69,7 +69,7 @@ class RobosuitePolicy(nn.Module):
         super().__init__()
         self.core = RobosuiteCore(camera_dim=camera_dim, framestack=framestack, act=act)
         self.action_mean = nn.Linear(self.core.hidden, n_actions)
-        self.log_std = nn.Parameter(-torch.ones(n_actions))
+        self.log_std = nn.Parameter(torch.zeros(n_actions))
     
     def forward(self, x):
         x = self.core(x)
