@@ -16,7 +16,7 @@ import imageio
 from models import ResBlock, MLP
 
 class RobosuiteCore(nn.Module):
-    def __init__(self, hidden=64, camera_dim=64, framestack=4, proprio_dim=43, act=nn.SELU, num_hidden=3):
+    def __init__(self, hidden=64, camera_dim=64, framestack=4, proprio_dim=37, act=nn.SELU, num_hidden=3):
         super().__init__()
         self.act = act()
         self.proprio_dim = proprio_dim
@@ -160,7 +160,7 @@ def main(args):
                 horizon=256,
                 control_freq=10,
                 table_full_size=(0.8, 2.0, 0.05),
-                table_offset=(0, 0, 0.6)
+                table_offset=(0, 0, 0.7)
             )
             # if not eval:
             env = DomainRandomizationWrapper(env, seed=seed, randomize_color=False, randomize_every_n_steps=0)
@@ -200,6 +200,8 @@ def main(args):
     def transform_obs(obs, camera_name='agentview_image'):
         image = np.flip(obs[camera_name], 0).mean(-1, keepdims=True) / 255
         proprio = obs['robot0_proprio-state'] * 10
+        # 0-34 is up to eef_quat, 35-38 are quat site, 39-40 are gripper qpos and 41-42
+        proprio = np.concatenate([proprio[:35], proprio[39:41]])
         dim = image.shape[0] * image.shape[1]
         new_channel = np.zeros(dim)
         new_channel[:proprio.size] = proprio
@@ -312,7 +314,7 @@ if __name__ == '__main__':
     parser.add_argument('--max-grad-norm', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--rollout-length', type=int, default=256)
-    parser.add_argument('--num-envs', type=int, default=1)
+    parser.add_argument('--num-envs', type=int, default=24)
     parser.add_argument('--timesteps', type=int, default=50_000_000)
     parser.add_argument('--num-epochs', type=int, default=4)
     parser.add_argument('--num-minibatches', type=int, default=4)
