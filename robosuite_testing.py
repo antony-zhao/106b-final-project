@@ -202,7 +202,7 @@ def main(args):
 
     def transform_obs(obs, rms, camera_name='agentview_image'):
         image = np.flip(obs[camera_name], 0).mean(-1, keepdims=True) / 255
-        proprio = (obs['robot0_proprio-state'] - rms.mean) / (np.sqrt(rms.var) + 1e-8)
+        proprio = obs['robot0_proprio-state']
         # object_state = obs['object-state']
         # additional = np.concatenate([proprio, object_state])
         dim = image.shape[0] * image.shape[1]
