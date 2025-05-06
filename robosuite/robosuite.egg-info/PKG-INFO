@@ -1,4 +1,4 @@
-Metadata-Version: 2.4
+Metadata-Version: 2.1
 Name: robosuite
 Version: 1.5.1
 Summary: robosuite: A Modular Simulation Framework and Benchmark for Robot Learning
@@ -20,15 +20,6 @@ Requires-Dist: pynput
 Requires-Dist: termcolor
 Requires-Dist: pytest
 Requires-Dist: tqdm
-Dynamic: author
-Dynamic: author-email
-Dynamic: description
-Dynamic: description-content-type
-Dynamic: home-page
-Dynamic: license-file
-Dynamic: requires-dist
-Dynamic: requires-python
-Dynamic: summary
 
 # robosuite
 
