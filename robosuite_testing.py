@@ -2,6 +2,7 @@ import numpy as np
 import robosuite as suite
 import gymnasium as gym
 from robosuite.wrappers import GymWrapper, DomainRandomizationWrapper
+from robosuite.controllers import load_part_controller_config, ALL_COMPOSITE_CONTROLLERS, ALL_PART_CONTROLLERS
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 import torch
@@ -69,7 +70,7 @@ class RobosuitePolicy(nn.Module):
         super().__init__()
         self.core = RobosuiteCore(camera_dim=camera_dim, framestack=framestack, act=act)
         self.action_mean = nn.Linear(self.core.hidden, n_actions)
-        self.log_std = nn.Parameter(torch.zeros(n_actions))
+        self.log_std = nn.Parameter(-torch.ones(n_actions))
     
     def forward(self, x):
         x = self.core(x)
@@ -142,10 +143,12 @@ def main(args):
     # create environment instance
     def make_env(env_name, camera_dim, seed, framestack=4, eval=False):
         def thunk():
+            controller = load_part_controller_config(default_controller="JOINT_VELOCITY")
             env = suite.make(
                 env_name=env_name, # try with other tasks like "Stack" and "Door"
                 robots="Sawyer",  # try with other robots like "Sawyer" and "Jaco"
                 # has_renderer=eval,
+                # controller_configs=controller,
                 render_collision_mesh=False,
                 has_offscreen_renderer=True,
                 use_camera_obs=True,
@@ -286,7 +289,7 @@ def main(args):
         logger = Logger(f'logs/{args.env}')
         for i in range(total_updates):
             rollout, obs, train_rew = collect_rollout(env, ppo_network, rnd, args.rollout_length, obs, obs_rms)
-            metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.num_minibatches, args.num_epochs, device, rnd_coef=0, discount=0.99,
+            metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.num_minibatches, args.num_epochs, device, rnd_coef=0.5, discount=0.999,
                                 max_grad_norm=args.max_grad_norm, clip=args.clip, ent_coef=args.ent_coef, val_coef=args.val_coef, sample_prob=32 / args.num_envs)
             anneal_lr(ppo_opt, args.lr, i, total_updates)
             logger.add_metrics(metrics)
