@@ -1,5 +1,5 @@
 import rospy
-from message_filters import Subscriber, TimeSynchronizer
+from message_filters import Subscriber, ApproximateTimeSynchronizer
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import Image
 from intera_interface import Limb
@@ -7,6 +7,7 @@ from intera_interface import Limb
 from cv_bridge import CvBridge
 import torch
 from collections import deque
+import time
 
 from utils import *
 from rl.rnd import PPONetwork
@@ -14,11 +15,12 @@ from rl.robosuite_testing import RobosuitePolicy, RobosuiteValue
 
 class SawyerRLController:
 
-    def __init__(self, model_path, cam_dim=100, framestack=4, action_size=7, device="cuda"):
+    def __init__(self, model_path, cam_dim=100, framestack=4, action_size=7, ctrl_freq=10, device="cuda"):
         self.device = device
         self.bridge = CvBridge()
         self.cam_dim = cam_dim
         self.framestack = framestack
+        self.ctrl_itv = 1 / ctrl_freq
 
         # RL Agent Model
         policy = RobosuitePolicy(action_size, camera_dim=cam_dim, framestack=framestack)
@@ -38,10 +40,17 @@ class SawyerRLController:
         self.sub_robot = Subscriber("env/robot_state", Float64MultiArray)
         self.ts_env = TimeSynchronizer([self.sub_cam, self.sub_robot], queue_size=10)
         self.ts_env.registerCallback(self.callback)
+        self.last_time = 0    # used to ensure control frequency
 
     def callback(self, img_msg, state_msg):
+        now = time.time()
+        if now - self.last_time < self.ctrl_itv:
+            return
+        self.last_time = now
+        
         frame = bridge.imgmsg_to_cv2(img_msg, desired_encoding="mono8")
         cv_img = cv2.resize(frame, (self.cam_dim, self.cam_dim))/255.
+        frame = np.expand_dims(frame, axis=-1)
 
         proprio = np.array(state_msg.data, dtype=np.float32)
 
@@ -79,6 +88,7 @@ if __name__ == "__main__":
         cam_dim=100,
         framestack=4,
         action_size=7,
+        ctrl_freq=10,
         device=device,
     )
     rospy.spin()
