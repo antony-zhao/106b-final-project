@@ -75,6 +75,7 @@ class SawyerRLController:
         with torch.no_grad():
             action, _ = self.model.policy_network.policy_fn(obs_tensor, det=True)
             action = torch.tanh(action).cpu().numpy()[0][:7]
+            print(action)
 
         # control sawyer
         self.limb.set_joint_velocities(joint_array_to_dict(action, self.limb))
