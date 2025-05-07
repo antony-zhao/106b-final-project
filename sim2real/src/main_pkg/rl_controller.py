@@ -27,7 +27,7 @@ class SawyerRLController:
         # RL Agent Model
         policy = RobosuitePolicy(action_size, camera_dim=cam_dim, framestack=framestack)
         value = RobosuiteValue(camera_dim=cam_dim, framestack=framestack)
-        self.model = PPONetwork(policy, value)
+        self.model = PPONetwork(policy, value).to(device)
         self.model.load_state_dict(torch.load(model_path, map_location=self.device))
         self.model.eval()
 
@@ -71,16 +71,13 @@ class SawyerRLController:
         obs_stack = obs_stack.transpose(0, 3, 1, 2).reshape(-1, self.cam_dim, self.cam_dim)
         obs_tensor = torch.tensor(obs_stack).unsqueeze(0).float().to(self.device)
 
-        print(obs_tensor.shape)
-
         # obtain action from agent
         with torch.no_grad():
-            action, _ = self.model.policy_network.policy_fn(obs, det=True)
-            action = torch.tanh(action).cpu().numpy()[0]
-            print(action)
+            action, _ = self.model.policy_network.policy_fn(obs_tensor, det=True)
+            action = torch.tanh(action).cpu().numpy()[0][:7]
 
         # control sawyer
-        # self.limb.set_joint_velocities(joint_array_to_dict(action, self.limb))
+        self.limb.set_joint_velocities(joint_array_to_dict(action, self.limb))
 
 
 if __name__ == "__main__":
