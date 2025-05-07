@@ -158,7 +158,7 @@ def main(args):
                 # single_object_mode=2,
                 camera_heights=camera_dim,
                 camera_widths=camera_dim,
-                reward_shaping=True,
+                reward_shaping=eval,
                 hard_reset=False,
                 horizon=256,
                 control_freq=10,
@@ -240,7 +240,7 @@ def main(args):
                 if 'episode' in info:
                     total_reward += infos['episode']['r']
                     num_completed += 1
-        env.reset()
+        eval_env.reset()
         return total_reward, frames
 
     def anneal_lr(optim, lr, update, num_updates):
@@ -289,7 +289,7 @@ def main(args):
         logger = Logger(f'logs/{args.env}')
         for i in range(total_updates):
             rollout, obs, train_rew = collect_rollout(env, ppo_network, rnd, args.rollout_length, obs, obs_rms)
-            metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.num_minibatches, args.num_epochs, device, rnd_coef=0.5, discount=0.999,
+            metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.num_minibatches, args.num_epochs, device, rnd_coef=1, discount=0.999, ext_coef=0,
                                 max_grad_norm=args.max_grad_norm, clip=args.clip, ent_coef=args.ent_coef, val_coef=args.val_coef, sample_prob=32 / args.num_envs)
             anneal_lr(ppo_opt, args.lr, i, total_updates)
             logger.add_metrics(metrics)
@@ -317,7 +317,7 @@ if __name__ == '__main__':
     parser.add_argument('--max-grad-norm', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--rollout-length', type=int, default=256)
-    parser.add_argument('--num-envs', type=int, default=32)
+    parser.add_argument('--num-envs', type=int, default=16)
     parser.add_argument('--timesteps', type=int, default=200_000_000)
     parser.add_argument('--num-epochs', type=int, default=4)
     parser.add_argument('--num-minibatches', type=int, default=4)
