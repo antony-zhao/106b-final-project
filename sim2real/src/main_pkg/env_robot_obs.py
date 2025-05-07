@@ -2,9 +2,9 @@
 
 import rospy
 import numpy as np
-from std_msgs.msg import Float64MultiArray
+from main_pkg.msg import TimeFloat32MultiArray
 from intera_interface import Limb, Gripper
-from sawyer_pykdl import sawyer_kinematics
+# from sawyer_pykdl import sawyer_kinematics
 from utils import *
 
 def get_observation(limb, kin, gripper):
@@ -36,14 +36,15 @@ def main():
     rate = rospy.Rate(10)
 
     limb = Limb('right')
-    kin = sawyer_kinematics('right')
+    # kin = sawyer_kinematics('right')
+    kin = None
     gripper = Gripper('right_gripper')
 
-    obs_pub = rospy.Publisher("/env/robot_state", Float64MultiArray, queue_size=10)
+    obs_pub = rospy.Publisher("/env/robot_state", TimeFloat32MultiArray, queue_size=10)
 
     while not rospy.is_shutdown():
         obs = get_observation(limb, kin, gripper)
-        msg = Float64MultiArray()
+        msg = TimeFloat32MultiArray()
         msg.data = obs.tolist()
         obs_pub.publish(msg)
         rate.sleep()

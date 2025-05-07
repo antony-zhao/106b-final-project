@@ -9,7 +9,7 @@ def main():
     obs_pub = rospy.Publisher("/env/cam", Image, queue_size=10)
     rate = rospy.Rate(30)
 
-    cam = cv2.VideoCapture(2)
+    cam = cv2.VideoCapture(0)
     bridge = CvBridge()
 
     # Get the default frame width and height

@@ -1,9 +1,11 @@
 import rospy
 from message_filters import Subscriber, ApproximateTimeSynchronizer
-from std_msgs.msg import Float64MultiArray
+# from std_msgs.msg import Float64MultiArray
+from main_pkg.msg import TimeFloat32MultiArray
 from sensor_msgs.msg import Image
 from intera_interface import Limb
 
+import cv2
 from cv_bridge import CvBridge
 import torch
 from collections import deque
@@ -37,8 +39,8 @@ class SawyerRLController:
 
         # ROS Subscribers
         self.sub_cam = Subscriber("env/cam", Image)
-        self.sub_robot = Subscriber("env/robot_state", Float64MultiArray)
-        self.ts_env = TimeSynchronizer([self.sub_cam, self.sub_robot], queue_size=10)
+        self.sub_robot = Subscriber("env/robot_state", TimeFloat32MultiArray)
+        self.ts_env = ApproximateTimeSynchronizer([self.sub_cam, self.sub_robot], queue_size=10, slop=0.1)
         self.ts_env.registerCallback(self.callback)
         self.last_time = 0    # used to ensure control frequency
 
@@ -48,8 +50,8 @@ class SawyerRLController:
             return
         self.last_time = now
         
-        frame = bridge.imgmsg_to_cv2(img_msg, desired_encoding="mono8")
-        cv_img = cv2.resize(frame, (self.cam_dim, self.cam_dim))/255.
+        frame = self.bridge.imgmsg_to_cv2(img_msg, desired_encoding="mono8")
+        frame = cv2.resize(frame, (self.cam_dim, self.cam_dim))/255.
         frame = np.expand_dims(frame, axis=-1)
 
         proprio = np.array(state_msg.data, dtype=np.float32)
@@ -69,6 +71,8 @@ class SawyerRLController:
         obs_stack = obs_stack.transpose(0, 3, 1, 2).reshape(-1, self.cam_dim, self.cam_dim)
         obs_tensor = torch.tensor(obs_stack).unsqueeze(0).float().to(self.device)
 
+        print(obs_tensor.shape)
+
         # obtain action from agent
         with torch.no_grad():
             action, _ = self.model.policy_network.policy_fn(obs, det=True)
@@ -82,12 +86,12 @@ class SawyerRLController:
 if __name__ == "__main__":
     rospy.init_node("sawyer_rl_controller")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_path = "../../../ppo_2460.pt"
+    model_path = "../../../denseRND_jointvel_model.pt"
     controller = SawyerRLController(
         model_path,
         cam_dim=100,
         framestack=4,
-        action_size=7,
+        action_size=8,
         ctrl_freq=10,
         device=device,
     )
