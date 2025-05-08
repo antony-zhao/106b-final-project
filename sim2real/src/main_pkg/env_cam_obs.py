@@ -21,6 +21,7 @@ def main():
     while not rospy.is_shutdown():
         ret, frame = cam.read()
 
+        frame = frame[:, 80:-80]
         grayscaled = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # cv2.imshow('Camera', grayscaled)
 

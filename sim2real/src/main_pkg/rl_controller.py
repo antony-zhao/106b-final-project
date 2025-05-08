@@ -54,7 +54,7 @@ class SawyerRLController:
         frame = cv2.resize(frame, (self.cam_dim, self.cam_dim))/255.
         frame = np.expand_dims(frame, axis=-1)
 
-        proprio = np.array(state_msg.data, dtype=np.float32)
+        proprio = np.array(state_msg.data, dtype=np.float32) * 10
 
         # transform obs
         dim = self.cam_dim * self.cam_dim
@@ -84,7 +84,7 @@ class SawyerRLController:
 if __name__ == "__main__":
     rospy.init_node("sawyer_rl_controller")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_path = "../../../denseRND_jointvel_model.pt"
+    model_path = "../../../RND2.pt"
     controller = SawyerRLController(
         model_path,
         cam_dim=100,
