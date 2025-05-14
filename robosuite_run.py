@@ -2,7 +2,7 @@ import numpy as np
 import robosuite as suite
 import gymnasium as gym
 from robosuite.wrappers import GymWrapper, DomainRandomizationWrapper
-from robosuite.controllers import load_part_controller_config, ALL_COMPOSITE_CONTROLLERS, ALL_PART_CONTROLLERS
+from robosuite.controllers import load_part_controller_config
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 import torch
@@ -15,6 +15,7 @@ from utils import to_numpy
 from logger import Logger
 import imageio
 from models import ResBlock, MLP
+import matplotlib.pyplot as plt
 
 class RobosuiteCore(nn.Module):
     def __init__(self, hidden=64, camera_dim=64, framestack=4, proprio_dim=37, act=nn.SELU, num_hidden=3):
@@ -221,18 +222,21 @@ def main(args):
     env = make_vec_env(make_env(args.env, args.camera_dim, args.seed, args.framestack), args.num_envs, args.seed, vec_env_cls=SubprocVecEnv, vec_env_kwargs=dict(start_method='spawn'))
     eval_env = make_env(args.env, args.camera_dim, args.seed, args.framestack, eval=True)()
     
-    def eval(ppo_network, eval_env):
+    def eval(ppo_network, eval_env, rnd, rms, rnd_rms):
         done = False
         obs, _ = eval_env.reset()
         total_reward = 0
         num_completed = 0
         frames = []
+        int_rewards = []
         while not done:
             obs = torch.as_tensor(obs).to(device).float()
             action, _ = ppo_network.policy_network.policy_fn(obs, det=True)
-            # action[:, 0] = 0
             action = torch.tanh(action)
             obs, reward, term, trunc, infos = eval_env.step(to_numpy(action))
+            intrinsic_reward, _ = rnd.compute_intrinsic(torch.as_tensor((obs - rms.mean) / (np.sqrt(rms.var) + 1e-8)).float().unsqueeze(0))
+            intrinsic_reward /= (np.sqrt(rnd_rms.var) + 1e-8)
+            int_rewards.append(intrinsic_reward)
             done = term or trunc
             total_reward += reward
             frames.append(np.flip(eval_env.env.env.env.env._get_observations()['agentview_image'], 0))
@@ -241,7 +245,7 @@ def main(args):
                     total_reward += infos['episode']['r']
                     num_completed += 1
         eval_env.reset()
-        return total_reward, frames
+        return total_reward, frames, int_rewards
 
     def anneal_lr(optim, lr, update, num_updates):
         frac = 1.0 - (update) / num_updates
@@ -289,7 +293,7 @@ def main(args):
         logger = Logger(f'logs/{args.env}')
         for i in range(total_updates):
             rollout, obs, train_rew = collect_rollout(env, ppo_network, rnd, args.rollout_length, obs, obs_rms)
-            metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.num_minibatches, args.num_epochs, device, rnd_coef=1, discount=0.999, ext_coef=0,
+            metrics = train_rnd(rollout, ppo_network, rnd, obs_rms, rnd_rms, ppo_opt, rnd_opt, args.num_minibatches, args.num_epochs, device, rnd_coef=0.5, discount=0.999, ext_coef=2,
                                 max_grad_norm=args.max_grad_norm, clip=args.clip, ent_coef=args.ent_coef, val_coef=args.val_coef, sample_prob=32 / args.num_envs)
             anneal_lr(ppo_opt, args.lr, i, total_updates)
             logger.add_metrics(metrics)
@@ -297,12 +301,14 @@ def main(args):
             if train_rew is not None:
                 logger.add_scalar('train_reward', train_rew)
             if i % 10 == 0:
-                eval_reward, frames = eval(ppo_network, eval_env)
+                eval_reward, frames, int_rewards = eval(ppo_network, eval_env, rnd, obs_rms, rnd_rms)
                 print(f'epoch {i}: {np.mean(eval_reward)}')
                 logger.add_scalar('eval_reward', eval_reward)
                 imageio.mimwrite(f'gifs/{args.env}_{i}.gif', frames[::4], loop=0, fps=20)
                 torch.save(ppo_network.state_dict(), f'{logger.logdir}/ppo_{i}.pt')
-                # np.savez(f'{logger.logdir}/proprio_norm_{i}.npz', mean=proprio_rms.mean, var=proprio_rms.var, count=proprio_rms.count)
+                plt.plot(int_rewards)
+                plt.savefig(f'{logger.logdir}/rnd_plot_{i}.png')
+                
             logger.write(i * args.num_envs * args.rollout_length)
 
 if __name__ == '__main__':
@@ -317,7 +323,7 @@ if __name__ == '__main__':
     parser.add_argument('--max-grad-norm', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--rollout-length', type=int, default=256)
-    parser.add_argument('--num-envs', type=int, default=16)
+    parser.add_argument('--num-envs', type=int, default=32)
     parser.add_argument('--timesteps', type=int, default=200_000_000)
     parser.add_argument('--num-epochs', type=int, default=4)
     parser.add_argument('--num-minibatches', type=int, default=4)
